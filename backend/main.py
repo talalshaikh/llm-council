@@ -1,10 +1,10 @@
 """FastAPI backend for LLM Council."""
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 import uuid
 import json
 import asyncio
@@ -29,11 +29,6 @@ class CreateConversationRequest(BaseModel):
     pass
 
 
-class SendMessageRequest(BaseModel):
-    """Request to send a message in a conversation."""
-    content: str
-
-
 class ConversationMetadata(BaseModel):
     """Conversation metadata for list view."""
     id: str
@@ -48,6 +43,54 @@ class Conversation(BaseModel):
     created_at: str
     title: str
     messages: List[Dict[str, Any]]
+
+
+MAX_ATTACHMENT_BYTES = 200_000
+
+
+async def build_attachment_payload(
+    content: str,
+    attachments: List[UploadFile],
+) -> Tuple[List[Dict[str, Any]], str, str]:
+    attachment_entries: List[Dict[str, Any]] = []
+    attachment_sections: List[str] = []
+
+    for attachment in attachments:
+        raw_data = await attachment.read()
+        truncated = False
+        if len(raw_data) > MAX_ATTACHMENT_BYTES:
+            raw_data = raw_data[:MAX_ATTACHMENT_BYTES]
+            truncated = True
+        text = raw_data.decode("utf-8", errors="replace").strip()
+        if not text:
+            text = "[No extractable text detected]"
+
+        entry = {
+            "filename": attachment.filename,
+            "content": text,
+        }
+        if truncated:
+            entry["truncated"] = True
+        attachment_entries.append(entry)
+
+        section = f"Attachment: {attachment.filename}\n{text}"
+        if truncated:
+            section += "\n[Truncated]"
+        attachment_sections.append(section)
+
+    normalized_content = content.strip()
+    if not normalized_content and attachment_entries:
+        normalized_content = "Please review the attached documents."
+
+    if attachment_sections:
+        prompt_content = (
+            f"{normalized_content}\n\nAttached documents:\n\n"
+            + "\n\n---\n\n".join(attachment_sections)
+        )
+    else:
+        prompt_content = normalized_content
+
+    return attachment_entries, normalized_content, prompt_content
 
 
 @app.get("/")
@@ -80,7 +123,11 @@ async def get_conversation(conversation_id: str):
 
 
 @app.post("/api/conversations/{conversation_id}/message")
-async def send_message(conversation_id: str, request: SendMessageRequest):
+async def send_message(
+    conversation_id: str,
+    content: str = Form(...),
+    attachments: List[UploadFile] = File(default=[])
+):
     """
     Send a message and run the 3-stage council process.
     Returns the complete response with all stages.
@@ -93,17 +140,22 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
     # Check if this is the first message
     is_first_message = len(conversation["messages"]) == 0
 
+    attachment_entries, normalized_content, prompt_content = await build_attachment_payload(
+        content,
+        attachments
+    )
+
     # Add user message
-    storage.add_user_message(conversation_id, request.content)
+    storage.add_user_message(conversation_id, normalized_content, attachment_entries)
 
     # If this is the first message, generate a title
     if is_first_message:
-        title = await generate_conversation_title(request.content)
+        title = await generate_conversation_title(normalized_content)
         storage.update_conversation_title(conversation_id, title)
 
     # Run the 3-stage council process
     stage1_results, stage2_results, stage3_result, metadata = await run_full_council(
-        request.content
+        prompt_content
     )
 
     # Add assistant message with all stages
@@ -124,7 +176,11 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
 
 
 @app.post("/api/conversations/{conversation_id}/message/stream")
-async def send_message_stream(conversation_id: str, request: SendMessageRequest):
+async def send_message_stream(
+    conversation_id: str,
+    content: str = Form(...),
+    attachments: List[UploadFile] = File(default=[])
+):
     """
     Send a message and stream the 3-stage council process.
     Returns Server-Sent Events as each stage completes.
@@ -137,30 +193,42 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
     # Check if this is the first message
     is_first_message = len(conversation["messages"]) == 0
 
+    attachment_entries, normalized_content, prompt_content = await build_attachment_payload(
+        content,
+        attachments
+    )
+
     async def event_generator():
         try:
             # Add user message
-            storage.add_user_message(conversation_id, request.content)
+            storage.add_user_message(conversation_id, normalized_content, attachment_entries)
 
             # Start title generation in parallel (don't await yet)
             title_task = None
             if is_first_message:
-                title_task = asyncio.create_task(generate_conversation_title(request.content))
+                title_task = asyncio.create_task(generate_conversation_title(normalized_content))
 
             # Stage 1: Collect responses
             yield f"data: {json.dumps({'type': 'stage1_start'})}\n\n"
-            stage1_results = await stage1_collect_responses(request.content)
+            stage1_results = await stage1_collect_responses(prompt_content)
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results})}\n\n"
 
             # Stage 2: Collect rankings
             yield f"data: {json.dumps({'type': 'stage2_start'})}\n\n"
-            stage2_results, label_to_model = await stage2_collect_rankings(request.content, stage1_results)
+            stage2_results, label_to_model = await stage2_collect_rankings(
+                prompt_content,
+                stage1_results
+            )
             aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
             yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings}})}\n\n"
 
             # Stage 3: Synthesize final answer
             yield f"data: {json.dumps({'type': 'stage3_start'})}\n\n"
-            stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results)
+            stage3_result = await stage3_synthesize_final(
+                prompt_content,
+                stage1_results,
+                stage2_results
+            )
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result})}\n\n"
 
             # Wait for title generation if it was started

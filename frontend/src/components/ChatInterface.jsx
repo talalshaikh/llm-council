@@ -11,6 +11,8 @@ export default function ChatInterface({
   isLoading,
 }) {
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState([]);
+  const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
 
   const scrollToBottom = () => {
@@ -23,9 +25,13 @@ export default function ChatInterface({
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (input.trim() && !isLoading) {
-      onSendMessage(input);
+    if ((input.trim() || attachments.length > 0) && !isLoading) {
+      onSendMessage(input, attachments);
       setInput('');
+      setAttachments([]);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
@@ -66,6 +72,21 @@ export default function ChatInterface({
                     <div className="markdown-content">
                       <ReactMarkdown>{msg.content}</ReactMarkdown>
                     </div>
+                    {msg.attachments?.length > 0 && (
+                      <div className="attachment-list">
+                        <div className="attachment-heading">Attachments</div>
+                        <ul>
+                          {msg.attachments.map((attachment, attachmentIndex) => (
+                            <li key={`${attachment.filename}-${attachmentIndex}`}>
+                              <span className="attachment-name">{attachment.filename}</span>
+                              {attachment.truncated && (
+                                <span className="attachment-meta"> (truncated)</span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -110,36 +131,57 @@ export default function ChatInterface({
           ))
         )}
 
-        {isLoading && (
-          <div className="loading-indicator">
-            <div className="spinner"></div>
-            <span>Consulting the council...</span>
-          </div>
-        )}
+      {isLoading && (
+        <div className="loading-indicator">
+          <div className="spinner"></div>
+          <span>Consulting the council...</span>
+        </div>
+      )}
 
         <div ref={messagesEndRef} />
       </div>
 
-      {conversation.messages.length === 0 && (
-        <form className="input-form" onSubmit={handleSubmit}>
+      <form className="input-form" onSubmit={handleSubmit}>
+        <div className="input-column">
           <textarea
             className="message-input"
-            placeholder="Ask your question... (Shift+Enter for new line, Enter to send)"
+            placeholder="Ask your question or add documents... (Shift+Enter for new line, Enter to send)"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={isLoading}
             rows={3}
           />
-          <button
-            type="submit"
-            className="send-button"
-            disabled={!input.trim() || isLoading}
-          >
-            Send
-          </button>
-        </form>
-      )}
+          <div className="attachment-controls">
+            <label className="attachment-button">
+              Add documents
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={(e) => setAttachments(Array.from(e.target.files || []))}
+                disabled={isLoading}
+              />
+            </label>
+            {attachments.length > 0 && (
+              <div className="attachment-preview">
+                {attachments.map((file, index) => (
+                  <span key={`${file.name}-${index}`} className="attachment-chip">
+                    {file.name}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+        <button
+          type="submit"
+          className="send-button"
+          disabled={(!input.trim() && attachments.length === 0) || isLoading}
+        >
+          Send
+        </button>
+      </form>
     </div>
   );
 }

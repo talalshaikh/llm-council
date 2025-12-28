@@ -49,15 +49,18 @@ export const api = {
   /**
    * Send a message in a conversation.
    */
-  async sendMessage(conversationId, content) {
+  async sendMessage(conversationId, content, attachments = []) {
+    const formData = new FormData();
+    formData.append('content', content);
+    attachments.forEach((file) => {
+      formData.append('attachments', file);
+    });
+
     const response = await fetch(
       `${API_BASE}/api/conversations/${conversationId}/message`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ content }),
+        body: formData,
       }
     );
     if (!response.ok) {
@@ -73,15 +76,18 @@ export const api = {
    * @param {function} onEvent - Callback function for each event: (eventType, data) => void
    * @returns {Promise<void>}
    */
-  async sendMessageStream(conversationId, content, onEvent) {
+  async sendMessageStream(conversationId, content, attachments, onEvent) {
+    const formData = new FormData();
+    formData.append('content', content);
+    attachments.forEach((file) => {
+      formData.append('attachments', file);
+    });
+
     const response = await fetch(
       `${API_BASE}/api/conversations/${conversationId}/message/stream`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ content }),
+        body: formData,
       }
     );
 
